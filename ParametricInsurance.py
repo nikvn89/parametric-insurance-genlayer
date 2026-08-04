@@ -2,65 +2,58 @@
 # { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 from genlayer import *
 import json
-from dataclasses import dataclass
 from urllib.parse import urlparse
 
-@allow_storage
-@dataclass
-class InsurancePolicy:
-    provider: Address
-    insured: Address
-    event_criteria: str
-    trusted_domains: list
-    payout_amount: bigint
-    status: str
-    claim_url: str
-    ai_rationale: str
-
 class ParametricInsurance(gl.Contract):
-    policies: TreeMap[str, InsurancePolicy]
-    next_policy_id: bigint
+    policies_str: str
 
     def __init__(self):
-        self.next_policy_id = bigint(1)
+        self.policies_str = "{}"
 
     @gl.public.write.payable
-    def create_policy(self, insured: Address, event_criteria: str, trusted_domains: list) -> None:
+    def create_policy(self, insured: str, event_criteria: str, trusted_domains: list) -> None:
         if not event_criteria.strip():
             raise gl.vm.UserError("Event criteria cannot be empty")
             
         if not trusted_domains:
             raise gl.vm.UserError("Must provide at least one trusted domain (e.g., 'noaa.gov', 'reuters.com')")
             
-        payout = gl.message.value if hasattr(gl.message, "value") else bigint(0)
-        if payout <= bigint(0):
+        payout = int(gl.message.value) if hasattr(gl.message, "value") else 0
+        if payout <= 0:
             raise gl.vm.UserError("Policy requires a positive payout funding amount")
             
-        policy_id = str(self.next_policy_id)
-        self.policies[policy_id] = InsurancePolicy(
-            provider=gl.message.sender,
-            insured=insured,
-            event_criteria=event_criteria,
-            trusted_domains=trusted_domains,
-            payout_amount=payout,
-            status="ACTIVE",
-            claim_url="",
-            ai_rationale=""
-        )
-        self.next_policy_id += bigint(1)
+        policies = json.loads(self.policies_str)
+        policy_id = str(len(policies) + 1)
+        
+        # Store everything as standard JSON serializable types
+        policies[policy_id] = {
+            "provider": str(gl.message.sender_address) if hasattr(gl.message, "sender_address") else "",
+            "insured": insured,
+            "event_criteria": event_criteria,
+            "trusted_domains": trusted_domains,
+            "payout_amount": payout,
+            "status": "ACTIVE",
+            "claim_url": "",
+            "ai_rationale": ""
+        }
+        
+        self.policies_str = json.dumps(policies)
 
     @gl.public.write
     def file_claim(self, policy_id: str, news_url: str) -> None:
-        if policy_id not in self.policies:
+        policies = json.loads(self.policies_str)
+        
+        if policy_id not in policies:
             raise gl.vm.UserError("Policy not found")
             
-        policy = self.policies[policy_id]
+        policy = policies[policy_id]
         
         # Caller Authorization: Only Insured can file a claim
-        if gl.message.sender != policy.insured:
+        sender = str(gl.message.sender_address) if hasattr(gl.message, "sender_address") else ""
+        if sender != policy["insured"]:
             raise gl.vm.UserError("Security Violation: Only the insured address can file a claim")
             
-        if policy.status != "ACTIVE":
+        if policy["status"] != "ACTIVE":
             raise gl.vm.UserError("Policy is not ACTIVE")
             
         news_url = news_url.strip()
@@ -72,37 +65,39 @@ class ParametricInsurance(gl.Contract):
             parsed_url = urlparse(news_url)
             hostname = parsed_url.hostname or ""
             is_trusted = False
-            for domain in policy.trusted_domains:
+            for domain in policy["trusted_domains"]:
                 if hostname == domain or hostname.endswith("." + domain):
                     is_trusted = True
                     break
             if not is_trusted:
-                raise gl.vm.UserError(f"URL hostname '{hostname}' is not in trusted domains: {policy.trusted_domains}")
+                raise gl.vm.UserError(f"URL hostname '{hostname}' is not in trusted domains: {policy['trusted_domains']}")
         except Exception as e:
             raise gl.vm.UserError(f"Invalid URL format: {str(e)}")
             
-        policy.claim_url = news_url
+        policy["claim_url"] = news_url
+        self.policies_str = json.dumps(policies)
 
     @gl.public.write
     def adjudicate_claim(self, policy_id: str) -> None:
-        if policy_id not in self.policies:
+        policies = json.loads(self.policies_str)
+        if policy_id not in policies:
             raise gl.vm.UserError("Policy not found")
             
-        policy = self.policies[policy_id]
+        policy = policies[policy_id]
         
         # Caller Authorization: Only Provider or Insured can adjudicate
-        sender = gl.message.sender
-        if sender != policy.provider and sender != policy.insured:
+        sender = str(gl.message.sender_address) if hasattr(gl.message, "sender_address") else ""
+        if sender != policy["provider"] and sender != policy["insured"]:
             raise gl.vm.UserError("Security Violation: Only Provider or Insured can trigger adjudication")
             
-        if policy.status != "ACTIVE":
+        if policy["status"] != "ACTIVE":
             raise gl.vm.UserError("Policy is already resolved")
             
-        if not policy.claim_url:
+        if not policy["claim_url"]:
             raise gl.vm.UserError("No claim URL filed yet")
             
-        criteria = policy.event_criteria
-        url = policy.claim_url
+        criteria = policy["event_criteria"]
+        url = policy["claim_url"]
         
         # Prompt Injection Fencing
         safe_criteria = criteria.replace("<UNTRUSTED_SUBMISSION>", "").replace("</UNTRUSTED_SUBMISSION>", "")
@@ -158,11 +153,18 @@ class ParametricInsurance(gl.Contract):
                 return json.dumps({"score": 0, "rationale": "Unparseable AI Response"})
 
         def validator_fn(leader_res) -> bool:
-            if not isinstance(leader_res, gl.vm.Return):
-                return False
-                
             try:
-                leader_data = json.loads(leader_res.value)
+                leader_str = ""
+                if type(leader_res) is str:
+                    leader_str = leader_res
+                elif hasattr(leader_res, "value"):
+                    leader_str = leader_res.value
+                elif hasattr(leader_res, "calldata"):
+                    leader_str = leader_res.calldata
+                else:
+                    return False
+                    
+                leader_data = json.loads(leader_str)
                 leader_score = int(leader_data.get("score", 0))
             except Exception:
                 return False
@@ -188,30 +190,23 @@ class ParametricInsurance(gl.Contract):
         final_data = json.loads(final_result_str)
         
         final_score = int(final_data["score"])
-        policy.ai_rationale = final_data["rationale"]
+        policy["ai_rationale"] = final_data["rationale"]
         
         # Atomic Payout Execution
         if final_score >= 50:
-            policy.status = "PAYOUT_APPROVED"
-            if policy.payout_amount > bigint(0):
-                gl.transfer(policy.insured, policy.payout_amount)
+            policy["status"] = "PAYOUT_APPROVED"
+            payout_amt = int(policy["payout_amount"])
+            if payout_amt > 0:
+                gl.transfer(policy["insured"], bigint(payout_amt))
         else:
-            policy.status = "CLAIM_DENIED"
+            policy["status"] = "CLAIM_DENIED"
+            
+        self.policies_str = json.dumps(policies)
 
     @gl.public.view
     def get_policy(self, policy_id: str) -> str:
-        if policy_id not in self.policies:
+        policies = json.loads(self.policies_str)
+        if policy_id not in policies:
             return "{}"
             
-        p = self.policies[policy_id]
-        
-        return json.dumps({
-            "provider": str(p.provider) if hasattr(p.provider, "__str__") else "",
-            "insured": str(p.insured) if hasattr(p.insured, "__str__") else "",
-            "event_criteria": p.event_criteria,
-            "trusted_domains": p.trusted_domains,
-            "payout_amount": int(p.payout_amount),
-            "status": p.status,
-            "claim_url": p.claim_url,
-            "ai_rationale": p.ai_rationale
-        })
+        return json.dumps(policies[policy_id])
