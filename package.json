@@ -1,0 +1,24 @@
+{
+  "name": "parametric-insurance-genlayer",
+  "version": "1.0.0",
+  "description": "This repository contains a state-of-the-art **Parametric Insurance Intelligent Contract** built natively for GenLayer (GenVM v0.2.16).",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nikvn89/parametric-insurance-genlayer.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/nikvn89/parametric-insurance-genlayer/issues"
+  },
+  "homepage": "https://github.com/nikvn89/parametric-insurance-genlayer#readme",
+  "dependencies": {
+    "genlayer-js": "^1.1.8"
+  }
+}

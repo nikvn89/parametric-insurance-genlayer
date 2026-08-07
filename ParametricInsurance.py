@@ -1,4 +1,4 @@
-# v0.2.16
+# v0.3.0
 # { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 from genlayer import *
 import json
@@ -25,7 +25,6 @@ class ParametricInsurance(gl.Contract):
         policies = json.loads(self.policies_str)
         policy_id = str(len(policies) + 1)
         
-        # Store everything as standard JSON serializable types
         policies[policy_id] = {
             "provider": str(gl.message.sender_address) if hasattr(gl.message, "sender_address") else "",
             "insured": insured,
@@ -48,7 +47,6 @@ class ParametricInsurance(gl.Contract):
             
         policy = policies[policy_id]
         
-        # Caller Authorization: Only Insured can file a claim
         sender = str(gl.message.sender_address) if hasattr(gl.message, "sender_address") else ""
         if sender != policy["insured"]:
             raise gl.vm.UserError("Security Violation: Only the insured address can file a claim")
@@ -85,7 +83,6 @@ class ParametricInsurance(gl.Contract):
             
         policy = policies[policy_id]
         
-        # Caller Authorization: Only Provider or Insured can adjudicate
         sender = str(gl.message.sender_address) if hasattr(gl.message, "sender_address") else ""
         if sender != policy["provider"] and sender != policy["insured"]:
             raise gl.vm.UserError("Security Violation: Only Provider or Insured can trigger adjudication")
@@ -103,7 +100,6 @@ class ParametricInsurance(gl.Contract):
         safe_criteria = criteria.replace("<UNTRUSTED_SUBMISSION>", "").replace("</UNTRUSTED_SUBMISSION>", "")
 
         def leader_fn() -> str:
-            # Graceful Fail-Closed Web Fetching
             try:
                 raw_news = gl.nondet.web.render(url, mode="text")
                 if len(raw_news) > 8000:
@@ -133,22 +129,34 @@ class ParametricInsurance(gl.Contract):
                 "50-100 means the event definitively occurred as described.\n\n"
                 "Return strictly a raw JSON object containing exactly two keys:\n"
                 "1. 'score': Integer from 0 to 100\n"
-                "2. 'rationale': String, brief explanation, max 300 chars.\n"
+                "2. 'rationale': String, brief explanation, max 280 chars.\n"
                 "Output no markdown, no backticks, only valid JSON."
             )
             
             ai_response = gl.nondet.exec_prompt(prompt)
             
             try:
-                # Defensive JSON Extraction
                 clean = ai_response.strip()
                 if "{" in clean and "}" in clean:
                     clean = clean[clean.find("{") : clean.rfind("}") + 1]
                 parsed = json.loads(clean)
-                score = int(parsed.get("score", 0))
-                rationale = str(parsed.get("rationale", "AI Parse Error"))[:297]
-                
-                return json.dumps({"score": max(0, min(100, score)), "rationale": rationale})
+
+                # ── Bounded schema validation ──────────────────────────────
+                score = parsed.get("score")
+                rationale = parsed.get("rationale")
+
+                # score must be an integer in [0, 100]
+                if score is None or not isinstance(score, (int, float)):
+                    score = 0
+                score = max(0, min(100, int(score)))
+
+                # rationale must be a non-empty string ≤ 280 chars
+                if not isinstance(rationale, str) or not rationale.strip():
+                    rationale = "No rationale provided"
+                rationale = rationale.strip()[:280]
+                # ───────────────────────────────────────────────────────────
+
+                return json.dumps({"score": score, "rationale": rationale})
             except Exception:
                 return json.dumps({"score": 0, "rationale": "Unparseable AI Response"})
 
@@ -163,36 +171,53 @@ class ParametricInsurance(gl.Contract):
                     leader_str = leader_res.calldata
                 else:
                     return False
-                    
+
                 leader_data = json.loads(leader_str)
-                leader_score = int(leader_data.get("score", 0))
+
+                # Validate leader schema before consuming
+                leader_score = leader_data.get("score")
+                leader_rationale = leader_data.get("rationale")
+                if leader_score is None or not isinstance(leader_score, (int, float)):
+                    return False
+                if not isinstance(leader_rationale, str) or not leader_rationale.strip():
+                    return False
+                leader_score = max(0, min(100, int(leader_score)))
+
             except Exception:
                 return False
 
             try:
-                val_data = json.loads(leader_fn())
-                val_score = int(val_data.get("score", 0))
+                val_result = json.loads(leader_fn())
+                val_score = int(val_result.get("score", 0))
             except Exception:
                 return False
                 
             # Semantic Banding Consensus
-            # 0: Denied (< 50)
-            # 1: Approved (>= 50)
             def get_band(s: int) -> int:
                 return 1 if s >= 50 else 0
                 
-            if get_band(leader_score) != get_band(val_score):
-                return False
-                
-            return True
+            return get_band(leader_score) == get_band(val_score)
 
         final_result_str = gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
-        final_data = json.loads(final_result_str)
+
+        # ── Bounded consumption of consensus result ────────────────────────
+        try:
+            final_data = json.loads(final_result_str)
+            final_score = final_data.get("score")
+            final_rationale = final_data.get("rationale")
+            if final_score is None or not isinstance(final_score, (int, float)):
+                final_score = 0
+            final_score = max(0, min(100, int(final_score)))
+            if not isinstance(final_rationale, str) or not final_rationale.strip():
+                final_rationale = "No rationale"
+            final_rationale = final_rationale.strip()[:280]
+        except Exception:
+            final_score = 0
+            final_rationale = "Result parse error"
+        # ──────────────────────────────────────────────────────────────────
+
+        policy["ai_rationale"] = final_rationale
         
-        final_score = int(final_data["score"])
-        policy["ai_rationale"] = final_data["rationale"]
-        
-        # Atomic Payout Execution
         if final_score >= 50:
             policy["status"] = "PAYOUT_APPROVED"
             payout_amt = int(policy["payout_amount"])
@@ -203,10 +228,67 @@ class ParametricInsurance(gl.Contract):
             
         self.policies_str = json.dumps(policies)
 
+    @gl.public.write
+    def withdraw_denied_policy(self, policy_id: str) -> None:
+        """
+        Allows the provider to reclaim funds after a policy is CLAIM_DENIED or EXPIRED.
+        Only the original provider can withdraw. Funds return to provider wallet.
+        """
+        policies = json.loads(self.policies_str)
+        if policy_id not in policies:
+            raise gl.vm.UserError("Policy not found")
+
+        policy = policies[policy_id]
+        sender = str(gl.message.sender_address) if hasattr(gl.message, "sender_address") else ""
+
+        if sender != policy["provider"]:
+            raise gl.vm.UserError("Security Violation: Only the policy provider can withdraw funds")
+
+        if policy["status"] not in ("CLAIM_DENIED", "EXPIRED"):
+            raise gl.vm.UserError(
+                f"Withdrawal only allowed for CLAIM_DENIED or EXPIRED policies. Current status: {policy['status']}"
+            )
+
+        payout_amt = int(policy.get("payout_amount", 0))
+        if payout_amt <= 0:
+            raise gl.vm.UserError("No funds to withdraw")
+
+        # Zero out before transfer to prevent re-entrancy
+        policy["payout_amount"] = 0
+        policy["status"] = "WITHDRAWN"
+        self.policies_str = json.dumps(policies)
+
+        gl.transfer(policy["provider"], bigint(payout_amt))
+
+    @gl.public.write
+    def expire_policy(self, policy_id: str) -> None:
+        """
+        Provider can mark an ACTIVE policy as EXPIRED if no claim was filed.
+        Enables subsequent withdrawal of locked funds.
+        """
+        policies = json.loads(self.policies_str)
+        if policy_id not in policies:
+            raise gl.vm.UserError("Policy not found")
+
+        policy = policies[policy_id]
+        sender = str(gl.message.sender_address) if hasattr(gl.message, "sender_address") else ""
+
+        if sender != policy["provider"]:
+            raise gl.vm.UserError("Only the policy provider can expire the policy")
+
+        if policy["status"] != "ACTIVE":
+            raise gl.vm.UserError(f"Only ACTIVE policies can be expired. Current: {policy['status']}")
+
+        policy["status"] = "EXPIRED"
+        self.policies_str = json.dumps(policies)
+
     @gl.public.view
     def get_policy(self, policy_id: str) -> str:
         policies = json.loads(self.policies_str)
         if policy_id not in policies:
             return "{}"
-            
         return json.dumps(policies[policy_id])
+
+    @gl.public.view
+    def get_all_policies(self) -> str:
+        return self.policies_str
