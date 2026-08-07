@@ -1,7 +1,7 @@
 # 🛡️ Parametric Insurance Intelligent Contract (GenLayer)
 
-**Contract (GenVM StudioNet):** `0xBC7dCe8cb566C68dC83D5C0f194a888144e2d0Ba`
-**Explorer:** https://explorer-studio.genlayer.com/address/0xBC7dCe8cb566C68dC83D5C0f194a888144e2d0Ba
+**Contract (GenVM StudioNet):** `0x9C4AAdC993D11248437BbDC736F0722B48832A3A`
+**Explorer:** https://explorer-studio.genlayer.com/address/0x9C4AAdC993D11248437BbDC736F0722B48832A3A
 **GitHub:** https://github.com/nikvn89/parametric-insurance-genlayer
 
 ---
