@@ -1,4 +1,4 @@
-# v0.3.0
+# v0.2.16
 # { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 from genlayer import *
 import json
@@ -14,17 +14,17 @@ class ParametricInsurance(gl.Contract):
     def create_policy(self, insured: str, event_criteria: str, trusted_domains: list) -> None:
         if not event_criteria.strip():
             raise gl.vm.UserError("Event criteria cannot be empty")
-            
+
         if not trusted_domains:
             raise gl.vm.UserError("Must provide at least one trusted domain (e.g., 'noaa.gov', 'reuters.com')")
-            
+
         payout = int(gl.message.value) if hasattr(gl.message, "value") else 0
         if payout <= 0:
             raise gl.vm.UserError("Policy requires a positive payout funding amount")
-            
+
         policies = json.loads(self.policies_str)
         policy_id = str(len(policies) + 1)
-        
+
         policies[policy_id] = {
             "provider": str(gl.message.sender_address) if hasattr(gl.message, "sender_address") else "",
             "insured": insured,
@@ -35,29 +35,29 @@ class ParametricInsurance(gl.Contract):
             "claim_url": "",
             "ai_rationale": ""
         }
-        
+
         self.policies_str = json.dumps(policies)
 
     @gl.public.write
     def file_claim(self, policy_id: str, news_url: str) -> None:
         policies = json.loads(self.policies_str)
-        
+
         if policy_id not in policies:
             raise gl.vm.UserError("Policy not found")
-            
+
         policy = policies[policy_id]
-        
+
         sender = str(gl.message.sender_address) if hasattr(gl.message, "sender_address") else ""
         if sender != policy["insured"]:
             raise gl.vm.UserError("Security Violation: Only the insured address can file a claim")
-            
+
         if policy["status"] != "ACTIVE":
             raise gl.vm.UserError("Policy is not ACTIVE")
-            
+
         news_url = news_url.strip()
         if not news_url:
             raise gl.vm.UserError("News URL cannot be empty")
-            
+
         # Trusted Source Verification
         try:
             parsed_url = urlparse(news_url)
@@ -68,10 +68,14 @@ class ParametricInsurance(gl.Contract):
                     is_trusted = True
                     break
             if not is_trusted:
-                raise gl.vm.UserError(f"URL hostname '{hostname}' is not in trusted domains: {policy['trusted_domains']}")
+                raise gl.vm.UserError(
+                    "URL hostname '" + hostname + "' is not in trusted domains: " + str(policy["trusted_domains"])
+                )
+        except gl.vm.UserError:
+            raise
         except Exception as e:
-            raise gl.vm.UserError(f"Invalid URL format: {str(e)}")
-            
+            raise gl.vm.UserError("Invalid URL format: " + str(e))
+
         policy["claim_url"] = news_url
         self.policies_str = json.dumps(policies)
 
@@ -80,22 +84,22 @@ class ParametricInsurance(gl.Contract):
         policies = json.loads(self.policies_str)
         if policy_id not in policies:
             raise gl.vm.UserError("Policy not found")
-            
+
         policy = policies[policy_id]
-        
+
         sender = str(gl.message.sender_address) if hasattr(gl.message, "sender_address") else ""
         if sender != policy["provider"] and sender != policy["insured"]:
             raise gl.vm.UserError("Security Violation: Only Provider or Insured can trigger adjudication")
-            
+
         if policy["status"] != "ACTIVE":
             raise gl.vm.UserError("Policy is already resolved")
-            
+
         if not policy["claim_url"]:
             raise gl.vm.UserError("No claim URL filed yet")
-            
+
         criteria = policy["event_criteria"]
         url = policy["claim_url"]
-        
+
         # Prompt Injection Fencing
         safe_criteria = criteria.replace("<UNTRUSTED_SUBMISSION>", "").replace("</UNTRUSTED_SUBMISSION>", "")
 
@@ -108,7 +112,7 @@ class ParametricInsurance(gl.Contract):
                     raw_news = "FETCH_FAILED_EMPTY_PAGE"
             except Exception:
                 raw_news = "FETCH_FAILED_NETWORK_ERROR"
-                
+
             safe_news = raw_news.replace("<UNTRUSTED_SUBMISSION>", "").replace("</UNTRUSTED_SUBMISSION>", "")
 
             prompt = (
@@ -132,29 +136,25 @@ class ParametricInsurance(gl.Contract):
                 "2. 'rationale': String, brief explanation, max 280 chars.\n"
                 "Output no markdown, no backticks, only valid JSON."
             )
-            
+
             ai_response = gl.nondet.exec_prompt(prompt)
-            
+
             try:
                 clean = ai_response.strip()
                 if "{" in clean and "}" in clean:
                     clean = clean[clean.find("{") : clean.rfind("}") + 1]
                 parsed = json.loads(clean)
 
-                # ── Bounded schema validation ──────────────────────────────
                 score = parsed.get("score")
                 rationale = parsed.get("rationale")
 
-                # score must be an integer in [0, 100]
                 if score is None or not isinstance(score, (int, float)):
                     score = 0
                 score = max(0, min(100, int(score)))
 
-                # rationale must be a non-empty string ≤ 280 chars
                 if not isinstance(rationale, str) or not rationale.strip():
                     rationale = "No rationale provided"
                 rationale = rationale.strip()[:280]
-                # ───────────────────────────────────────────────────────────
 
                 return json.dumps({"score": score, "rationale": rationale})
             except Exception:
@@ -174,7 +174,6 @@ class ParametricInsurance(gl.Contract):
 
                 leader_data = json.loads(leader_str)
 
-                # Validate leader schema before consuming
                 leader_score = leader_data.get("score")
                 leader_rationale = leader_data.get("rationale")
                 if leader_score is None or not isinstance(leader_score, (int, float)):
@@ -191,16 +190,15 @@ class ParametricInsurance(gl.Contract):
                 val_score = int(val_result.get("score", 0))
             except Exception:
                 return False
-                
+
             # Semantic Banding Consensus
             def get_band(s: int) -> int:
                 return 1 if s >= 50 else 0
-                
+
             return get_band(leader_score) == get_band(val_score)
 
         final_result_str = gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
 
-        # ── Bounded consumption of consensus result ────────────────────────
         try:
             final_data = json.loads(final_result_str)
             final_score = final_data.get("score")
@@ -214,10 +212,9 @@ class ParametricInsurance(gl.Contract):
         except Exception:
             final_score = 0
             final_rationale = "Result parse error"
-        # ──────────────────────────────────────────────────────────────────
 
         policy["ai_rationale"] = final_rationale
-        
+
         if final_score >= 50:
             policy["status"] = "PAYOUT_APPROVED"
             payout_amt = int(policy["payout_amount"])
@@ -225,7 +222,7 @@ class ParametricInsurance(gl.Contract):
                 gl.transfer(policy["insured"], bigint(payout_amt))
         else:
             policy["status"] = "CLAIM_DENIED"
-            
+
         self.policies_str = json.dumps(policies)
 
     @gl.public.write
@@ -246,14 +243,14 @@ class ParametricInsurance(gl.Contract):
 
         if policy["status"] not in ("CLAIM_DENIED", "EXPIRED"):
             raise gl.vm.UserError(
-                f"Withdrawal only allowed for CLAIM_DENIED or EXPIRED policies. Current status: {policy['status']}"
+                "Withdrawal only allowed for CLAIM_DENIED or EXPIRED policies. Current status: " + policy["status"]
             )
 
         payout_amt = int(policy.get("payout_amount", 0))
         if payout_amt <= 0:
             raise gl.vm.UserError("No funds to withdraw")
 
-        # Zero out before transfer to prevent re-entrancy
+        # Zero out before transfer (checks-effects-interactions)
         policy["payout_amount"] = 0
         policy["status"] = "WITHDRAWN"
         self.policies_str = json.dumps(policies)
@@ -263,8 +260,9 @@ class ParametricInsurance(gl.Contract):
     @gl.public.write
     def expire_policy(self, policy_id: str) -> None:
         """
-        Provider can mark an ACTIVE policy as EXPIRED if no claim was filed.
-        Enables subsequent withdrawal of locked funds.
+        Provider can mark an ACTIVE policy as EXPIRED only if no claim has been filed yet.
+        Once the insured has filed a claim (claim_url is set), expiry is permanently blocked.
+        This prevents providers from escaping a pending claim by expiring and withdrawing.
         """
         policies = json.loads(self.policies_str)
         if policy_id not in policies:
@@ -277,7 +275,16 @@ class ParametricInsurance(gl.Contract):
             raise gl.vm.UserError("Only the policy provider can expire the policy")
 
         if policy["status"] != "ACTIVE":
-            raise gl.vm.UserError(f"Only ACTIVE policies can be expired. Current: {policy['status']}")
+            raise gl.vm.UserError(
+                "Only ACTIVE policies can be expired. Current: " + policy["status"]
+            )
+
+        # KEY FIX: block expiry once a claim has been filed
+        if policy["claim_url"]:
+            raise gl.vm.UserError(
+                "Cannot expire policy: a claim has already been filed. "
+                "The claim must be adjudicated before any further action."
+            )
 
         policy["status"] = "EXPIRED"
         self.policies_str = json.dumps(policies)
