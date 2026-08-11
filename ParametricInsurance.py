@@ -32,6 +32,10 @@ class ParametricInsurance(gl.Contract):
         s = str(raw).strip()
         # datetime objects stringify with a space separator; normalise to 'T'
         s = s.replace(" ", "T", 1)
+        # drop a trailing UTC 'Z' so that stored expiry values (which are
+        # normalised the same way) compare consistently
+        if s.endswith("Z"):
+            s = s[:-1]
         return s
 
     def _is_iso_date(self, s: str) -> bool:
@@ -117,6 +121,8 @@ class ParametricInsurance(gl.Contract):
             clean_domains.append(d.strip().lower())
 
         expiry_at = expiry_at.strip()
+        if expiry_at.endswith("Z"):
+            expiry_at = expiry_at[:-1]
         if not self._is_iso_date(expiry_at):
             raise gl.vm.UserError(
                 "expiry_at must be an ISO-8601 timestamp, e.g. '2026-09-01T00:00:00'"
